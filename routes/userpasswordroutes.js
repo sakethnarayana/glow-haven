@@ -65,13 +65,15 @@ router.post("/register", async (req, res) => {
       { upsert: true }
     );
 
+    const oldusercheck=User.findOne({phone});
+
     // Note: The response is updated to reflect the assigned role.
     return sendResponse(res, 201, true, "Registration successful! Please login.", {
       user: {
-        id: authUser._id,
-        phone: authUser.phone,
-        name: authUser.name,
-        role: authUser.role, // Return the assigned role
+        id: oldusercheck._id,
+        phone: oldusercheck.phone,
+        name: oldusercheck.name,
+        role: oldusercheck.role, // Return the assigned role
       },
     });
 
@@ -121,7 +123,7 @@ router.post("/login", async (req, res) => {
     }
 
     // 4. Generate Token using the determined role
-    const token = createToken(authUser);
+    const token = createToken(oldUser);
 
     const x = await User.findOne({phone});
 
