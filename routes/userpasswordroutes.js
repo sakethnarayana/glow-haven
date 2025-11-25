@@ -123,10 +123,12 @@ router.post("/login", async (req, res) => {
     // 4. Generate Token using the determined role
     const token = createToken(authUser);
 
+    const x = await User.findOne({phone});
+
     // 5. Success Response
     return sendResponse(res, 200, true, `Login successful. Role: ${determinedRole}`, {
       user: {
-        _id: authUser._id,
+        _id: x._id,
         phone: authUser.phone,
         name: authUser.name,
         role: determinedRole, // Return the determined role
