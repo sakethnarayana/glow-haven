@@ -8,6 +8,7 @@ import {verifyToken} from "../middleware/authMiddleware.js";
 import { verifyAdmin } from "../middleware/adminMiddleware.js";
 
 import mongoose from "mongoose";
+import axios from 'axios';
 
 const router = express.Router();
 
@@ -296,6 +297,52 @@ router.get("/", verifyToken, async (req, res) => {
   }
 });
 
+// routes/bookings.js
+router.get("/:id/feedback-context", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid booking ID" });
+    }
+
+    const booking = await Booking.findById(id);
+
+    if (!booking) {
+      return res.status(404).json({ success: false, message: "Booking not found" });
+    }
+
+    // ✅ IMPORTANT PART
+    // How we resolve service depends on your system
+    // Example assumptions below ⬇️
+
+    /**
+     * OPTION A (most common):
+     * Booking already has serviceName → find service by name
+     */
+    const service = await Service.findOne({ name: booking.serviceName });
+
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found for this booking",
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        serviceId: service._id,
+        bookingId: booking._id,
+      },
+    });
+  } catch (err) {
+    console.error("Feedback context error:", err);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+
 // ============================================
 // 📄 GET USER'S BOOKINGS — Authenticated users
 // ============================================
@@ -491,6 +538,47 @@ router.put("/:id", verifyToken, async (req, res) => {
 // ============================================
 // ✏️ UPDATE BOOKING STATUS — Admin only
 // ============================================
+// router.put("/:id/status", verifyToken, verifyAdmin, async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const { status } = req.body;
+
+//     if (!isValidObjectId(id)) {
+//       return sendResponse(res, 400, false, "Invalid booking ID format");
+//     }
+
+//     if (!status) {
+//       return sendResponse(res, 400, false, "Status is required");
+//     }
+
+//     if (!["pending", "confirmed", "completed", "cancelled","in_progress"].includes(status)) {
+//       return sendResponse(res, 400, false, "Invalid status value");
+//     }
+
+//     const booking = await Booking.findById(id);
+//     if (!booking) {
+//       return sendResponse(res, 404, false, "Booking not found");
+//     }
+
+    
+
+//     const updatedBooking = await Booking.findByIdAndUpdate(
+//       id,
+//       { status },
+//       { new: true, runValidators: true }
+//     )
+//       .populate("userId", "name phone")
+//       .populate("serviceId", "name price duration");
+
+//     sendResponse(res, 200, true, "Booking status updated successfully", updatedBooking);
+//   } catch (error) {
+//     console.error("❌ Update Status Error:", error);
+//     sendResponse(res, 500, false, "Server error while updating booking status");
+//   }
+// });
+
+
+// ============================================
 router.put("/:id/status", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -508,20 +596,57 @@ router.put("/:id/status", verifyToken, verifyAdmin, async (req, res) => {
       return sendResponse(res, 400, false, "Invalid status value");
     }
 
-    const booking = await Booking.findById(id);
+    const booking = await Booking.findById(id)
+      .populate("userId", "name phone")
+      .populate("serviceId", "name price duration");
+
     if (!booking) {
       return sendResponse(res, 404, false, "Booking not found");
     }
 
-    
+    // update booking
+    booking.status = status;
+    const updatedBooking = await booking.save();
 
-    const updatedBooking = await Booking.findByIdAndUpdate(
-      id,
-      { status },
-      { new: true, runValidators: true }
-    )
-      .populate("userId", "name phone")
-      .populate("serviceId", "name price duration");
+    // send whatsapp using Fast2SMS
+    const sendWhatsApp = async ({ messageId = "10116", variables = [], phone }) => {
+      try {
+        if (!phone) return;
+        // normalize phone digits
+        let digits = phone.replace(/\D/g, "");
+        if (!digits.startsWith("91")) digits = `91${digits}`;
+        const numbersParam = encodeURIComponent(digits);
+
+        const vars = variables.map(v => String(v).replace(/\|/g, ' ')).join("|");
+        const url =
+          `https://www.fast2sms.com/dev/whatsapp?` +
+          `authorization=${process.env.FAST_2_SMS_API_KEY}` +
+          `&message_id=${encodeURIComponent(messageId)}` +
+          `&phone_number_id=982032241651336` +
+          `&numbers=${numbersParam}` +
+          `&variables_values=${encodeURIComponent(vars)}`;
+
+        await axios.get(url, { timeout: 10000 });
+        console.log("📲 WhatsApp sent:", digits, messageId, vars);
+      } catch (err) {
+        console.error("❌ WhatsApp failed:", err?.response?.data || err.message);
+      }
+    };
+
+    // Build variables: Var1 = user name, Var2 = parlour name (static), Var3 = service name
+    const userName = updatedBooking.userId?.name || "Customer";
+    const parlourName = "Sri Saharsha";
+    const serviceName = updatedBooking.serviceName || updatedBooking.serviceId?.name || "Service";
+
+    // Send message for important status changes
+    // (you can adjust which statuses trigger messages)
+    if (["confirmed", "completed", "cancelled", "in_progress"].includes(status)) {
+      await sendWhatsApp({
+        messageId: "10116",
+        variables: [userName, parlourName, serviceName],
+        phone: updatedBooking.userId?.phone || ""
+      });
+    }
 
     sendResponse(res, 200, true, "Booking status updated successfully", updatedBooking);
   } catch (error) {

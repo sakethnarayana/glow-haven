@@ -3,6 +3,8 @@ import Product from "../models/Product.js";
 import Order from "../models/Order.js";
 import { verifyToken } from "../middleware/authMiddleware.js";
 import { verifyAdmin } from "../middleware/adminMiddleware.js";
+import { sendOrderWhatsapp } from "../utils/sendWhatsappOrderUpdate.js";
+
 import mongoose from "mongoose";
 
 const router = express.Router();
@@ -283,6 +285,48 @@ router.put("/:id", verifyToken, verifyAdmin, async (req, res) => {
 // ============================================
 // 🗑️ DELETE PRODUCT — Admin only (with order check)
 // ============================================
+// router.delete("/:id", verifyToken, verifyAdmin, async (req, res) => {
+//   try {
+//     const { id } = req.params;
+
+//     if (!isValidObjectId(id)) {
+//       return sendResponse(res, 400, false, "Invalid product ID format");
+//     }
+
+//     const product = await Product.findById(id);
+//     if (!product) {
+//       return sendResponse(res, 404, false, "Product not found");
+//     }
+
+//     // Check if product has active orders
+//     const activeOrders = await Order.countDocuments({
+//       "items.productId": id,
+//       status: { $in: ["pending", "confirmed"] },
+//     });
+
+//     if (activeOrders > 0) {
+//       return sendResponse(
+//         res,
+//         400,
+//         false,
+//         `Cannot delete product. ${activeOrders} active order(s) contain this product.`
+//       );
+//     }
+
+//     // Option 1: Hard delete (remove completely)
+//     await Product.findByIdAndDelete(id);
+
+//     // Option 2: Soft delete (if you add isActive field to schema)
+//     // await Product.findByIdAndUpdate(id, { isActive: false });
+
+//     sendResponse(res, 200, true, "Product deleted successfully");
+//   } catch (error) {
+//     console.error("❌ Delete Product Error:", error);
+//     sendResponse(res, 500, false, "Server error while deleting product");
+//   }
+// });
+
+
 router.delete("/:id", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -296,26 +340,38 @@ router.delete("/:id", verifyToken, verifyAdmin, async (req, res) => {
       return sendResponse(res, 404, false, "Product not found");
     }
 
-    // Check if product has active orders
-    const activeOrders = await Order.countDocuments({
-      "items.productId": id,
-      status: { $in: ["pending", "confirmed"] },
-    });
+    const activeOrdersAgg = await Order.aggregate([
+      {
+        $match: {
+          "items.productId": new mongoose.Types.ObjectId(id),
+          status: { $in: ["pending", "confirmed", "in_transit"] },
+        },
+      },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
 
-    if (activeOrders > 0) {
-      return sendResponse(
-        res,
-        400,
-        false,
-        `Cannot delete product. ${activeOrders} active order(s) contain this product.`
-      );
+    if (activeOrdersAgg.length > 0) {
+      const breakdown = { pending: 0, confirmed: 0, in_transit: 0 };
+
+      activeOrdersAgg.forEach((row) => {
+        breakdown[row._id] = row.count;
+      });
+
+      return sendResponse(res, 409, false, "ACTIVE_ORDERS_EXIST", {
+        breakdown,
+        total:
+          breakdown.pending +
+          breakdown.confirmed +
+          breakdown.in_transit,
+      });
     }
 
-    // Option 1: Hard delete (remove completely)
     await Product.findByIdAndDelete(id);
-
-    // Option 2: Soft delete (if you add isActive field to schema)
-    // await Product.findByIdAndUpdate(id, { isActive: false });
 
     sendResponse(res, 200, true, "Product deleted successfully");
   } catch (error) {
@@ -323,6 +379,7 @@ router.delete("/:id", verifyToken, verifyAdmin, async (req, res) => {
     sendResponse(res, 500, false, "Server error while deleting product");
   }
 });
+
 
 // ============================================
 // 📊 GET PRODUCT STATISTICS — Admin only

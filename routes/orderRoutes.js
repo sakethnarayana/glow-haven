@@ -3,9 +3,14 @@ import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 import Address from "../models/Address.js";
 import User from "../models/User.js";
+import { sendOrderWhatsapp } from "../utils/sendWhatsappOrderUpdate.js";
+
+import axios from "axios";
+
 
 import {verifyToken} from "../middleware/authMiddleware.js";
 import { verifyAdmin } from "../middleware/adminMiddleware.js";
+
 
 import mongoose from "mongoose";
 
@@ -182,26 +187,98 @@ router.post("/", verifyToken, async (req, res) => {
 // ============================================
 // 📄 GET ALL ORDERS — Admin only (with pagination & filters)
 // ============================================
+// router.get("/", verifyToken, verifyAdmin, async (req, res) => {
+//   try {
+//     const page = Math.max(1, parseInt(req.query.page) || 1);
+//     const limit = Math.min(50, parseInt(req.query.limit) || 10);
+//     const skip = (page - 1) * limit;
+
+//     // Build filter
+//     const filter = {};
+
+//     // Filter by order status
+//     if (req.query.status) {
+//       filter.status = req.query.status;
+//     }
+
+//     // Filter by payment status
+//     if (req.query.paymentStatus) {
+//       filter.paymentStatus = req.query.paymentStatus;
+//     }
+
+//     // Filter by payment method
+//     if (req.query.paymentMethod) {
+//       filter.paymentMethod = req.query.paymentMethod;
+//     }
+
+//     // Filter by date range
+//     if (req.query.startDate || req.query.endDate) {
+//       filter.createdAt = {};
+//       if (req.query.startDate) {
+//         filter.createdAt.$gte = new Date(req.query.startDate);
+//       }
+//       if (req.query.endDate) {
+//         filter.createdAt.$lte = new Date(req.query.endDate);
+//       }
+//     }
+
+//     // Filter by price range
+//     if (req.query.minAmount || req.query.maxAmount) {
+//       filter.totalAmount = {};
+//       if (req.query.minAmount) {
+//         filter.totalAmount.$gte = parseFloat(req.query.minAmount);
+//       }
+//       if (req.query.maxAmount) {
+//         filter.totalAmount.$lte = parseFloat(req.query.maxAmount);
+//       }
+//     }
+
+//     // Execute query with pagination
+//     const [orders, total] = await Promise.all([
+//       Order.find(filter)
+//         .populate("userId", "name phone")
+//         .populate("addressId")
+//         .sort({ createdAt: -1 })
+//         .limit(limit)
+//         .skip(skip),
+//       Order.countDocuments(filter),
+//     ]);
+
+//     sendResponse(res, 200, true, "Orders fetched successfully", {
+//       orders,
+//       pagination: {
+//         total,
+//         page,
+//         limit,
+//         pages: Math.ceil(total / limit),
+//       },
+//     });
+//   } catch (error) {
+//     console.error("❌ Get All Orders Error:", error);
+//     sendResponse(res, 500, false, "Server error while fetching orders");
+//   }
+// });
+
 router.get("/", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
-    const limit = Math.min(50, parseInt(req.query.limit) || 10);
+    const limit = Math.min(200, parseInt(req.query.limit) || 50); // allow bigger page for admin
     const skip = (page - 1) * limit;
 
-    // Build filter
     const filter = {};
 
-    // Filter by order status
+    // Filter by order status (logistics)
     if (req.query.status) {
       filter.status = req.query.status;
     }
 
-    // Filter by payment status
-    if (req.query.paymentStatus) {
-      filter.paymentStatus = req.query.paymentStatus;
+    // Filter by productId (admin UX)
+    if (req.query.productId && isValidObjectId(req.query.productId)) {
+      // match orders that include this product
+      filter["items.productId"] = req.query.productId;
     }
 
-    // Filter by payment method
+    // Filter by payment method (optional)
     if (req.query.paymentMethod) {
       filter.paymentMethod = req.query.paymentMethod;
     }
@@ -209,26 +286,17 @@ router.get("/", verifyToken, verifyAdmin, async (req, res) => {
     // Filter by date range
     if (req.query.startDate || req.query.endDate) {
       filter.createdAt = {};
-      if (req.query.startDate) {
-        filter.createdAt.$gte = new Date(req.query.startDate);
-      }
-      if (req.query.endDate) {
-        filter.createdAt.$lte = new Date(req.query.endDate);
-      }
+      if (req.query.startDate) filter.createdAt.$gte = new Date(req.query.startDate);
+      if (req.query.endDate) filter.createdAt.$lte = new Date(req.query.endDate);
     }
 
-    // Filter by price range
+    // Filter by amount range
     if (req.query.minAmount || req.query.maxAmount) {
       filter.totalAmount = {};
-      if (req.query.minAmount) {
-        filter.totalAmount.$gte = parseFloat(req.query.minAmount);
-      }
-      if (req.query.maxAmount) {
-        filter.totalAmount.$lte = parseFloat(req.query.maxAmount);
-      }
+      if (req.query.minAmount) filter.totalAmount.$gte = parseFloat(req.query.minAmount);
+      if (req.query.maxAmount) filter.totalAmount.$lte = parseFloat(req.query.maxAmount);
     }
 
-    // Execute query with pagination
     const [orders, total] = await Promise.all([
       Order.find(filter)
         .populate("userId", "name phone")
@@ -241,16 +309,37 @@ router.get("/", verifyToken, verifyAdmin, async (req, res) => {
 
     sendResponse(res, 200, true, "Orders fetched successfully", {
       orders,
-      pagination: {
-        total,
-        page,
-        limit,
-        pages: Math.ceil(total / limit),
-      },
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
     });
   } catch (error) {
     console.error("❌ Get All Orders Error:", error);
     sendResponse(res, 500, false, "Server error while fetching orders");
+  }
+});
+
+
+router.get("/admin/active-orders-by-product/:productId", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const { productId } = req.params;
+    if (!isValidObjectId(productId)) {
+      return sendResponse(res, 400, false, "Invalid product ID");
+    }
+
+    const activeStatuses = ["pending", "confirmed", "in_transit"];
+
+    // limit returned list size to avoid big payload
+    const orders = await Order.find({
+      "items.productId": productId,
+      status: { $in: activeStatuses },
+    }).select("_id status createdAt").limit(50).sort({ createdAt: -1 });
+
+    sendResponse(res, 200, true, "Active orders fetched", {
+      count: orders.length,
+      orders,
+    });
+  } catch (err) {
+    console.error("❌ Active order check error", err);
+    sendResponse(res, 500, false, "Failed to check active orders");
   }
 });
 
@@ -328,6 +417,54 @@ router.get("/:id", verifyToken, async (req, res) => {
 // ============================================
 // ✏️ UPDATE ORDER STATUS — Admin only
 // ============================================
+// router.put("/:id/status", verifyToken, verifyAdmin, async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const { status, paymentStatus } = req.body;
+
+//     if (!isValidObjectId(id)) {
+//       return sendResponse(res, 400, false, "Invalid order ID format");
+//     }
+
+//     if (!status && !paymentStatus) {
+//       return sendResponse(res, 400, false, "Status or paymentStatus is required");
+//     }
+
+//     if (status && !["pending", "confirmed", "delivered", "cancelled","in_transit"].includes(status)) {
+//       return sendResponse(res, 400, false, "Invalid status value");
+//     }
+
+    
+
+//     const order = await Order.findById(id);
+//     if (!order) {
+//       return sendResponse(res, 404, false, "Order not found");
+//     }
+
+   
+
+//     // Update fields
+//     const updateFields = {};
+//     if (status) updateFields.status = status;
+//     if (paymentStatus) updateFields.paymentStatus = paymentStatus;
+
+//     const updatedOrder = await Order.findByIdAndUpdate(id, updateFields, {
+//       new: true,
+//       runValidators: true,
+//     })
+//       .populate("userId", "name phone")
+//       .populate("addressId");
+
+//     sendResponse(res, 200, true, "Order updated successfully", updatedOrder);
+//   } catch (error) {
+//     console.error("❌ Update Order Error:", error);
+//     sendResponse(res, 500, false, "Server error while updating order");
+//   }
+// });
+
+
+
+
 router.put("/:id/status", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const { id } = req.params;
@@ -341,37 +478,120 @@ router.put("/:id/status", verifyToken, verifyAdmin, async (req, res) => {
       return sendResponse(res, 400, false, "Status or paymentStatus is required");
     }
 
-    if (status && !["pending", "confirmed", "delivered", "cancelled","in_transit"].includes(status)) {
+    const allowedStatuses = [
+      "pending",
+      "confirmed",
+      "in_transit",
+      "delivered",
+      "cancelled",
+    ];
+
+    if (status && !allowedStatuses.includes(status)) {
       return sendResponse(res, 400, false, "Invalid status value");
     }
 
-    
+    // =========================================
+    // FETCH ORDER WITH USER + PRODUCT IMAGE
+    // =========================================
+    const order = await Order.findById(id)
+      .populate("userId", "name phone")
+      .populate("items.productId", "price image");
 
-    const order = await Order.findById(id);
     if (!order) {
       return sendResponse(res, 404, false, "Order not found");
     }
 
-   
+    // =========================================
+    // UPDATE ORDER
+    // =========================================
+    if (status) order.status = status;
+    if (paymentStatus) order.paymentStatus = paymentStatus;
+    await order.save();
 
-    // Update fields
-    const updateFields = {};
-    if (status) updateFields.status = status;
-    if (paymentStatus) updateFields.paymentStatus = paymentStatus;
+    // =========================================
+    // FIND MAX PRICED PRODUCT IMAGE
+    // =========================================
+    let maxPrice = 0;
+    let maxPriceImage = null;
 
-    const updatedOrder = await Order.findByIdAndUpdate(id, updateFields, {
-      new: true,
-      runValidators: true,
-    })
-      .populate("userId", "name phone")
-      .populate("addressId");
+    order.items.forEach((item) => {
+      const itemTotal =
+        item.subtotal ??
+        item.productId?.price * item.quantity ??
+        0;
 
-    sendResponse(res, 200, true, "Order updated successfully", updatedOrder);
+      if (itemTotal > maxPrice) {
+        maxPrice = itemTotal;
+        maxPriceImage = item.productId?.image || null;
+      }
+    });
+
+    // =========================================
+    // WHATSAPP SENDER (SAFE)
+    // =========================================
+    const sendWhatsApp = async ({ templateId, variables, mediaUrl }) => {
+      try {
+        const phone = order.userId?.phone;
+        if (!phone) return;
+
+        const formattedPhone = phone.startsWith("91")
+          ? phone
+          : `91${phone}`;
+
+        let url =
+          `https://www.fast2sms.com/dev/whatsapp?` +
+          `authorization=${process.env.FAST_2_SMS_API_KEY}` +
+          `&message_id=${templateId}` +
+          `&phone_number_id=982032241651336` +
+          `&numbers=${formattedPhone}` +
+          `&variables_values=${variables.join("|")}`;
+
+        if (mediaUrl) {
+          url += `&media_url=${encodeURIComponent(mediaUrl)}`;
+        }
+
+        await axios.get(url, { timeout: 10000 });
+
+        console.log("📲 WhatsApp sent:", templateId, formattedPhone);
+      } catch (err) {
+        console.error(
+          "❌ WhatsApp failed:",
+          err?.response?.data || err.message
+        );
+      }
+    };
+
+    // =========================================
+    // WHATSAPP TRIGGERS (FINAL LOGIC)
+    // =========================================
+    const userName = order.userId?.name || "Customer";
+    const shortOrderId = order._id.toString().slice(0, 8);
+    const readableStatus = status.replace("_", " ");
+
+    // 🔔 CONFIRMED / CANCELLED → TEMPLATE 10083 (WITH IMAGE)
+    if (status === "confirmed" || status === "cancelled") {
+      await sendWhatsApp({
+        templateId: "10083",
+        variables: [userName, shortOrderId, readableStatus],
+        mediaUrl: maxPriceImage || undefined,
+      });
+    }
+
+    // 🚚 IN TRANSIT / DELIVERED → TEMPLATE 10079 (NO IMAGE)
+    if (status === "in_transit" || status === "delivered") {
+      await sendWhatsApp({
+        templateId: "10079",
+        variables: [userName, shortOrderId, readableStatus],
+      });
+    }
+
+    sendResponse(res, 200, true, "Order updated successfully", order);
   } catch (error) {
     console.error("❌ Update Order Error:", error);
     sendResponse(res, 500, false, "Server error while updating order");
   }
 });
+
 
 // ============================================
 // ✏️ UPDATE PAYMENT STATUS — Admin only
